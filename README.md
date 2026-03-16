@@ -23,7 +23,7 @@ The system operates as a "double-loop" agentic workflow:
 - Google Cloud SDK (for deployment).
 **Local Setup**
 1. **Clone the repo:**
-    git clone https://github.com/IWesa/Remote-Hands.git
+    git clone https://github.com/Iwesa/Remote-Hands.git
     cd remote-hands-agent
 2. **Install dependancies:**
     pip install -r requirements.txt
