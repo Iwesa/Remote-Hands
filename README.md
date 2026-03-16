@@ -21,3 +21,15 @@ The system operates as a "double-loop" agentic workflow:
 - A Google AI Studio API Key.
 - Python 3.10+.
 - Google Cloud SDK (for deployment).
+**Local Setup**
+1. **Clone the repo:**
+    git clone https://github.com/IWesa/Remote-Hands.git
+    cd remote-hands-agent
+2. **Install dependancies:**
+    pip install -r requirements.txt
+3. **Run the server:**
+    export GEMINI_API_KEY="your_key_here"
+    export GOOGLE_API_KEY="your_key_here"
+    python main.py
+## Project Vision
+Surveying equipment is becoming increasingly complex. The Remote Hands aims to bridge the gap between sophisticated hardware and on-site human expertise, ensuring that no project is delayed due to a missing manual or a cryptic error code.
