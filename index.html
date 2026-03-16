@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>The Remote Hands - Field Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex flex-col items-center p-4 font-sans">
+
+    <div class="w-full max-w-md text-center mt-4 mb-6">
+        <h1 class="text-2xl font-bold text-blue-400">The Remote Hands</h1>
+        <p class="text-xs text-gray-400">High-Precision Troubleshooting Agent</p>
+    </div>
+    
+    <div class="w-full max-w-md bg-black rounded-xl overflow-hidden border border-gray-700 relative shadow-2xl">
+        
+        <video id="videoElement" autoplay playsinline class="w-full h-80 object-cover"></video>
+        
+        <div class="absolute top-0 left-0 w-full bg-black bg-opacity-70 p-2 text-center text-xs font-mono text-green-400 border-b border-gray-700 transition-all duration-300" id="statusText">
+            System Standby
+        </div>
+
+        <div class="absolute bottom-0 left-0 w-full bg-gradient-to-t from-black to-transparent pt-12 pb-4 px-4 text-center text-sm font-medium text-gray-100 italic drop-shadow-md" id="geminiText">
+            Agent output will appear here...
+        </div>
+    </div>
+
+    <div class="flex gap-4 mt-8 w-full max-w-md">
+        <button id="startBtn" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-xl font-bold shadow-lg transition-all active:scale-95">
+            Start Session
+        </button>
+        <button id="stopBtn" class="flex-1 bg-red-600 hover:bg-red-500 text-white py-4 rounded-xl font-bold shadow-lg transition-all opacity-50 cursor-not-allowed" disabled>
+            End Session
+        </button>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('videoElement');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusText = document.getElementById('statusText');
+        const geminiText = document.getElementById('geminiText');
+
+        let ws = null;
+        let audioCtx = null;
+        let videoInterval = null;
+        let nextPlayTime = 0;
+        let micProcessor = null;
+        let micSource = null;
+        let isManualDisconnect = false;
+
+        // Force Rear Camera for inspecting equipment
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "environment", width: 640, height: 480 },
+                    audio: false 
+                });
+                videoElement.srcObject = stream;
+            } catch (err) {
+                statusText.innerText = "Camera access denied";
+                statusText.classList.replace('text-green-400', 'text-red-400');
+            }
+        }
+
+        async function startSession() {
+            try {
+                isManualDisconnect = false; 
+
+                // Gemini natively outputs at 24000Hz.
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+                await audioCtx.resume();
+                nextPlayTime = 0;
+
+                // 🚨 REPLACE THIS URL IF YOUR CLOUD RUN URL CHANGED 🚨
+                ws = new WebSocket("wss://remote-hands-backend-920423859996.us-central1.run.app/ws");
+
+                ws.onopen = async () => {
+                    statusText.innerText = "Connecting to Satellite Link...";
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                    startBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                    stopBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+
+                    // Raw 16kHz PCM Capture for Gemini's ears
+                    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+                    const micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 }); 
+                    
+                    micSource = micAudioCtx.createMediaStreamSource(audioStream);
+                    micProcessor = micAudioCtx.createScriptProcessor(4096, 1, 1);
+                    micSource.connect(micProcessor);
+                    micProcessor.connect(micAudioCtx.destination);
+                    
+                    micProcessor.onaudioprocess = (e) => {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            const inputData = e.inputBuffer.getChannelData(0);
+                            const pcm16 = new Int16Array(inputData.length);
+                            for (let i = 0; i < inputData.length; i++) {
+                                let s = Math.max(-1, Math.min(1, inputData[i]));
+                                pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                            }
+                            
+                            const uint8 = new Uint8Array(pcm16.buffer);
+                            let binary = '';
+                            for (let i = 0; i < uint8.byteLength; i+=1024) {
+                                binary += String.fromCharCode.apply(null, uint8.subarray(i, i+1024));
+                            }
+                            
+                            ws.send(JSON.stringify({ type: "audio", data: window.btoa(binary) }));
+                        }
+                    };
+
+                    // Send video frame every 1 second
+                    const canvas = document.createElement("canvas");
+                    const ctx = canvas.getContext("2d");
+                    videoInterval = setInterval(() => {
+                        if (ws.readyState === WebSocket.OPEN && videoElement.videoWidth) {
+                            canvas.width = videoElement.videoWidth;
+                            canvas.height = videoElement.videoHeight;
+                            ctx.drawImage(videoElement, 0, 0);
+                            const base64Image = canvas.toDataURL("image/jpeg", 0.5).split(",")[1];
+                            ws.send(JSON.stringify({ type: "video", data: base64Image }));
+                        }
+                    }, 1000); 
+                };
+
+                ws.onmessage = async (event) => {
+                    try {
+                        const message = JSON.parse(event.data);
+                        
+                        if (message.type === "audio") {
+                            const binaryString = window.atob(message.data);
+                            const validLen = binaryString.length - (binaryString.length % 2); 
+                            const floatArray = new Float32Array(validLen / 2);
+            
+                            for (let i = 0; i < validLen / 2; i++) {
+                                const byte1 = binaryString.charCodeAt(i * 2);
+                                const byte2 = binaryString.charCodeAt(i * 2 + 1);
+                                let int16 = byte1 | (byte2 << 8);
+                                if (int16 & 0x8000) int16 |= 0xFFFF0000; 
+                                floatArray[i] = int16 / 32768.0; 
+                            }
+            
+                            const audioBuffer = audioCtx.createBuffer(1, floatArray.length, 24000);
+                            audioBuffer.copyToChannel(floatArray, 0);
+                            
+                            const source = audioCtx.createBufferSource();
+                            source.buffer = audioBuffer;
+                            source.connect(audioCtx.destination);
+                            
+                            const currentTime = audioCtx.currentTime;
+                            if (nextPlayTime < currentTime) nextPlayTime = currentTime;
+                            source.start(nextPlayTime);
+                            nextPlayTime += audioBuffer.duration;
+                            
+                        } else if (message.type === "status") {
+                            // Don't let normal status overwrite an active Error
+                            if (statusText.innerText.includes("Error") && !message.data.includes("Error")) return;
+                            
+                            statusText.innerText = message.data;
+                            if (message.data.includes("Error")) {
+                                statusText.classList.replace('text-green-400', 'text-red-400');
+                                statusText.classList.replace('text-yellow-400', 'text-red-400');
+                            } else if (message.data.includes("Searching")) {
+                                statusText.classList.replace('text-green-400', 'text-yellow-400');
+                            } else {
+                                statusText.classList.replace('text-yellow-400', 'text-green-400');
+                                statusText.classList.replace('text-red-400', 'text-green-400');
+                            }
+                        } else if (message.type === "text") {
+                            geminiText.innerText = `"${message.data}"`;
+                        }
+                    } catch (err) {
+                        console.error("Parse error:", err);
+                    }
+                };
+
+                ws.onclose = () => {
+                    if (isManualDisconnect) {
+                        statusText.innerText = "Session Ended";
+                        statusText.classList.replace('text-red-400', 'text-green-400');
+                        statusText.classList.replace('text-yellow-400', 'text-green-400');
+                    } else if (!statusText.innerText.includes("Error")) {
+                        statusText.innerText = "Call Dropped (Server Disconnected)";
+                        statusText.classList.replace('text-green-400', 'text-red-400');
+                    }
+                    cleanupSession();
+                };
+
+            } catch (err) {
+                statusText.innerText = `Setup Error: ${err.message}`;
+            }
+        }
+
+        function cleanupSession() {
+            isManualDisconnect = true; 
+            
+            if (micProcessor) micProcessor.disconnect();
+            if (micSource) micSource.disconnect();
+            if (videoInterval) clearInterval(videoInterval);
+            if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            startBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+            stopBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        }
+
+        startBtn.addEventListener('click', startSession);
+        stopBtn.addEventListener('click', cleanupSession);
+        
+        // Initialize camera as soon as the page loads
+        setupCamera();
+    </script>
+</body>
+</html>
